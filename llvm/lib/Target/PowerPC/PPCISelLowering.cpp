@@ -11595,6 +11595,15 @@ SDValue PPCTargetLowering::LowerSCALAR_TO_VECTOR(SDValue Op,
 
   MachineFunction &MF = DAG.getMachineFunction();
   SDValue Op0 = Op.getOperand(0);
+  EVT ValVT = Op0.getValueType();
+  unsigned EltSize = Op.getValueType().getScalarSizeInBits();
+  if (isa<ConstantSDNode>(Op0) && EltSize <= 32) {
+    int64_t IntVal = Op.getConstantOperandVal(0);
+    if (IntVal >= -16 && IntVal <= 15)
+      return getCanonicalConstSplat(IntVal, EltSize / 8, Op.getValueType(), DAG,
+                                    dl);
+  }
+
   ReuseLoadInfo RLI;
   if (Subtarget.hasLFIWAX() && Subtarget.hasVSX() &&
       Op.getValueType() == MVT::v4i32 && Op0.getOpcode() == ISD::LOAD &&
@@ -11619,7 +11628,6 @@ SDValue PPCTargetLowering::LowerSCALAR_TO_VECTOR(SDValue Op,
   SDValue FIdx = DAG.getFrameIndex(FrameIdx, PtrVT);
 
   SDValue Val = Op0;
-  EVT ValVT = Val.getValueType();
   // P10 hardware store forwarding requires that a single store contains all
   // the data for the load. P10 is able to merge a pair of adjacent stores. Try
   // to avoid load hit store on P10 when running binaries compiled for older
@@ -17359,25 +17367,33 @@ SDValue PPCTargetLowering::LowerFRAMEADDR(SDValue Op,
   return FrameAddr;
 }
 
-// FIXME? Maybe this could be a TableGen attribute on some registers and
-// this table could be generated automatically from RegInfo.
-Register PPCTargetLowering::getRegisterByName(const char* RegName, LLT VT,
-                                              const MachineFunction &MF) const {
-  bool isPPC64 = Subtarget.isPPC64();
+#define GET_REGISTER_MATCHER
+#include "PPCGenAsmMatcher.inc"
 
-  bool is64Bit = isPPC64 && VT == LLT::scalar(64);
-  if (!is64Bit && VT != LLT::scalar(32))
+Register PPCTargetLowering::getRegisterByName(const char *RegName, LLT VT,
+                                              const MachineFunction &MF) const {
+  bool IsPPC64 = Subtarget.isPPC64();
+
+  bool Is64Bit = IsPPC64 && VT == LLT::scalar(64);
+  if (!Is64Bit && VT != LLT::scalar(32))
     report_fatal_error("Invalid register global variable type");
 
-  Register Reg = StringSwitch<Register>(RegName)
-                     .Case("r1", is64Bit ? PPC::X1 : PPC::R1)
-                     .Case("r2", isPPC64 ? Register() : PPC::R2)
-                     .Case("r13", (is64Bit ? PPC::X13 : PPC::R13))
-                     .Default(Register());
+  Register Reg = MatchRegisterName(RegName);
+  if (!Reg)
+    report_fatal_error(
+        Twine("Invalid global name register \"" + StringRef(RegName) + "\"."));
 
-  if (Reg)
-    return Reg;
-  report_fatal_error("Invalid register name global variable");
+  // FIXME: Unable to generate code for `-O2` but okay for `-O0`.
+  // Need followup investigation as to why.
+  if ((IsPPC64 && Reg == PPC::R2) || Reg == PPC::R0)
+    report_fatal_error(Twine("Trying to reserve an invalid register \"" +
+                             StringRef(RegName) + "\"."));
+
+  // Convert GPR to GP8R register for 64bit.
+  if (Is64Bit && StringRef(RegName).starts_with_insensitive("r"))
+    Reg = Reg.id() - PPC::R0 + PPC::X0;
+
+  return Reg;
 }
 
 bool PPCTargetLowering::isAccessedAsGotIndirect(SDValue GA) const {
